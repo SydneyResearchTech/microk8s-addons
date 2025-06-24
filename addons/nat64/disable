@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+# microk8s/addons/nat64/disable
+import os
+import subprocess
+import click
+import json
+import re
+from utils import NeedsRoot
+
+ENABLE = os.path.expandvars("$SNAP/microk8s-enable.wrapper")
+KUBECTL = os.path.expandvars("$SNAP/microk8s-kubectl.wrapper")
+LOCK = os.path.expandvars("${SNAP_DATA}/var/lock/nat64.enabled")
+
+def coredns():
+    click.echo("Configure coredns")
+    configmap = subprocess.run([
+        KUBECTL,"get","configmap/coredns","--namespace=kube-system","--output=json"
+        ], capture_output=True, encoding="utf-8")
+    coredns_configmap = json.loads(configmap.stdout)
+    corefile = ""
+    is_dns64 = False
+    for line in coredns_configmap["data"]["Corefile"].splitlines():
+        if is_dns64:
+            if re.match(r'^\s+}$', line):
+                is_dns64 = False
+            continue
+        if re.match(r'^\s+dns64', line):
+            is_dns64 = True
+            continue
+        corefile += line + "\n"
+    coredns_configmap["data"]["Corefile"] = corefile
+    subprocess.run([
+        KUBECTL,"apply","--filename=-","--namespace=kube-system",
+        ], input=json.dumps(coredns_configmap).encode())
+
+def main():
+    NeedsRoot()
+    coredns()
+    click.echo("Disable TAYGA service")
+    subprocess.check_call([
+        "systemctl","disable","--now","tayga.service",
+        ])
+    os.remove(LOCK)
+
+if __name__ == "__main__":
+    main()

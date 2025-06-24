@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+# microk8s/addons/nat64/enable
+import os
+import subprocess
+import click
+import json
+import re
+from utils import NeedsRoot
+
+ENABLE = os.path.expandvars("$SNAP/microk8s-enable.wrapper")
+KUBECTL = os.path.expandvars("$SNAP/microk8s-kubectl.wrapper")
+LOCK = os.path.expandvars("${SNAP_DATA}/var/lock/nat64.enabled")
+
+def tayga(prefix):
+    click.echo("Install TAYGA - NAT64 for Linux")
+    conf = [
+            "tun-device nat64",
+            "ipv4-addr 100.64.0.1",
+            f"prefix {prefix}",
+            "dynamic-pool 100.64.0.0/10",
+            "data-dir /var/spool/tayga",
+            ]
+    subprocess.check_call([
+        "apt-get","-y","install","tayga",
+        ])
+    click.echo("Update TAYGA configuration")
+    with open("/etc/tayga.conf", "w") as f:
+        f.writelines('\n'.join(conf))
+    subprocess.check_call([
+        "systemctl","enable","--now","tayga.service",
+        ])
+
+def coredns(prefix):
+    click.echo("Configure coredns")
+    dns64 = [
+            "dns64 {",
+            "  translate_all",
+            f"  prefix {prefix}",
+            "  allow_ipv4",
+            "}",
+            ]
+    configmap = subprocess.run([
+        KUBECTL,"get","configmap/coredns","--namespace=kube-system","--output=json"
+        ], capture_output=True, encoding="utf-8")
+    coredns_configmap = json.loads(configmap.stdout)
+    corefile = ""
+    is_root = False
+    for line in coredns_configmap["data"]["Corefile"].splitlines():
+        if re.match(r'^\.[0-9:]*\s+{$', line):
+            is_root = True
+        elif re.match(r'^\s+dns64', line):
+            is_root = False
+        elif re.match(r'^}$', line):
+            if is_root:
+                corefile += "    " + "\n    ".join(dns64) + "\n"
+                is_root = False
+        corefile += line + "\n"
+    coredns_configmap["data"]["Corefile"] = corefile
+    subprocess.run([
+        KUBECTL,"apply","--filename=-","--namespace=kube-system",
+        ], input=json.dumps(coredns_configmap).encode())
+
+@click.command()
+@click.option("--prefix", required=False, default="64:ff9b::/96")
+def main(prefix):
+    NeedsRoot()
+    subprocess.check_call([
+        ENABLE, "dns",
+        ])
+    tayga(prefix)
+    coredns(prefix)
+    with open(LOCK, 'w'):
+        pass
+
+if __name__ == "__main__":
+    main()
